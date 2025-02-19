@@ -74,12 +74,6 @@ func (job *Job) finish(out rc.Params, err error) {
 	running.kickExpire() // make sure this job gets expired
 }
 
-func (job *Job) addListener(fn *func()) {
-	job.mu.Lock()
-	defer job.mu.Unlock()
-	job.listeners = append(job.listeners, fn)
-}
-
 func (job *Job) removeListener(fn *func()) {
 	job.mu.Lock()
 	defer job.mu.Unlock()
@@ -94,10 +88,12 @@ func (job *Job) removeListener(fn *func()) {
 // OnFinish adds listener to job that will be triggered when job is finished.
 // It returns a function to cancel listening.
 func (job *Job) OnFinish(fn func()) func() {
+	job.mu.Lock()
+	defer job.mu.Unlock()
 	if job.Finished {
-		fn()
+		go fn()
 	} else {
-		job.addListener(&fn)
+		job.listeners = append(job.listeners, &fn)
 	}
 	return func() { job.removeListener(&fn) }
 }
@@ -122,7 +118,7 @@ type Jobs struct {
 
 var (
 	running   = newJobs()
-	jobID     = int64(0)
+	jobID     atomic.Int64
 	executeID = uuid.New().String()
 )
 
@@ -130,7 +126,7 @@ var (
 func newJobs() *Jobs {
 	return &Jobs{
 		jobs: map[int64]*Job{},
-		opt:  &rc.DefaultOpt,
+		opt:  &rc.Opt,
 	}
 }
 
@@ -141,7 +137,7 @@ func SetOpt(opt *rc.Options) {
 
 // SetInitialJobID allows for setting jobID before starting any jobs.
 func SetInitialJobID(id int64) {
-	if !atomic.CompareAndSwapInt64(&jobID, 0, id) {
+	if !jobID.CompareAndSwap(0, id) {
 		panic("Setting jobID is only possible before starting any jobs")
 	}
 }
@@ -264,7 +260,7 @@ var jobKey = jobKeyType{}
 
 // NewJob creates a Job and executes it, possibly in the background if _async is set
 func (jobs *Jobs) NewJob(ctx context.Context, fn rc.Func, in rc.Params) (job *Job, out rc.Params, err error) {
-	id := atomic.AddInt64(&jobID, 1)
+	id := jobID.Add(1)
 	in = in.Copy() // copy input so we can change it
 
 	ctx, isAsync, err := getAsync(ctx, in)
